@@ -1,0 +1,10 @@
+# Core simulation + training. Pinned loosely; CUDA wheel chosen per host.
+torch>=2.4
+numpy>=1.26
+# PPO + logging
+tensorboard>=2.16
+# Nemotron mission layer via Nebius Token Factory (OpenAI-compatible endpoint)
+openai>=1.40
+# Eval reporting
+pandas>=2.2
+matplotlib>=3.8

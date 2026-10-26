@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leviathan Replay</title>
+<style>
+  :root{
+    --bg:#05080f; --panel:rgba(10,18,30,.82); --line:rgba(120,190,255,.16);
+    --ink:#dbe9f7; --dim:#7e93ab; --ok:#2ee6a8; --warn:#ffc24d; --bad:#ff5d6c;
+    --accent:#4ea8ff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    overflow:hidden}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column}
+  #stage{flex:1;position:relative;display:flex;min-height:0}
+  .pane{flex:1;position:relative;min-width:0;border-right:1px solid var(--line)}
+  .pane:last-child{border-right:none}
+  .pane canvas{display:block;width:100%;height:100%}
+  .tag{position:absolute;top:10px;left:12px;z-index:3;pointer-events:none}
+  .tag b{display:block;font-size:13px;letter-spacing:.02em}
+  .tag span{font-size:11px;color:var(--dim)}
+  .verdict{position:absolute;top:10px;right:12px;z-index:3;font-size:11px;
+    font-weight:600;padding:3px 9px;border-radius:999px;letter-spacing:.04em}
+  .v-ok{background:rgba(46,230,168,.14);color:var(--ok);
+    border:1px solid rgba(46,230,168,.35)}
+  .v-bad{background:rgba(255,93,108,.14);color:var(--bad);
+    border:1px solid rgba(255,93,108,.35)}
+  .hud{position:absolute;left:12px;bottom:12px;z-index:3;width:216px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:10px 11px;backdrop-filter:blur(8px)}
+  .row{display:flex;justify-content:space-between;gap:8px;margin:0 0 6px}
+  .row:last-child{margin-bottom:0}
+  .row i{font-style:normal;color:var(--dim)}
+  .row b{font-variant-numeric:tabular-nums;font-weight:600}
+  .meter{height:4px;border-radius:999px;background:rgba(255,255,255,.08);
+    overflow:hidden;margin-top:2px}
+  .meter>div{height:100%;transition:width .08s linear}
+  #bar{display:flex;align-items:center;gap:14px;padding:9px 14px;
+    background:var(--panel);border-top:1px solid var(--line);flex-wrap:wrap}
+  button{background:rgba(78,168,255,.12);color:var(--ink);cursor:pointer;
+    border:1px solid rgba(78,168,255,.3);border-radius:7px;padding:5px 12px;
+    font:inherit;font-weight:600}
+  button:hover{background:rgba(78,168,255,.22)}
+  input[type=range]{flex:1;min-width:160px;accent-color:var(--accent)}
+  #clock{font-variant-numeric:tabular-nums;color:var(--dim);min-width:92px}
+  select{background:#0c1624;color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:5px 8px;font:inherit}
+  #phase{font-weight:700;letter-spacing:.08em;color:var(--accent);
+    min-width:86px;text-align:center}
+  #err{position:fixed;inset:0;display:none;place-items:center;padding:28px;
+    text-align:center;color:var(--dim);z-index:9;background:var(--bg)}
+  #err code{color:var(--accent)}
+  @media (max-width:760px){
+    #stage{flex-direction:column}
+    .pane{border-right:none;border-bottom:1px solid var(--line)}
+    .hud{width:auto;right:12px}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"></div>
+  <div id="bar">
+    <button id="play">Pause</button>
+    <span id="phase">—</span>
+    <input id="scrub" type="range" min="0" max="1000" value="0">
+    <span id="clock">0.0 / 0.0 s</span>
+    <select id="speed">
+      <option value="0.25">0.25x</option>
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+    </select>
+    <button id="cam">Camera</button>
+  </div>
+</div>
+<div id="err"><div>
+  <h2>No trajectory data</h2>
+  <p>Generate it with<br><code>python -m eval.run_eval --record surge</code><br>
+  then serve this folder:<br><code>python -m http.server -d viz 8000</code></p>
+</div></div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+const PHASES = ['LIFT','STABILISE','MATE','DONE'];
+// Which runs to show side by side. The pairing is the point: the same surge,
+// one loop too slow to hold the cable and one fast enough.
+const WANT = [
+  {file:'traj_teleop_600_surge.json', label:'Teleop @ 600 ms',
+   sub:'control loop on the ship — 0.14 Hz bandwidth'},
+  {file:'traj_autonomy_surge.json',  label:'Onboard autonomy @ 50 Hz',
+   sub:'control loop on the vehicle — 7.96 Hz bandwidth'},
+];
+const WORKING_TENSION = 8000, MIN_BEND = 1.0, LIFT_H = 4.0;
+
+async function load(){
+  const out = [];
+  for (const w of WANT){
+    try{
+      const r = await fetch(w.file);
+      if (r.ok) out.push({...w, data: await r.json()});
+    }catch(e){ /* missing file is fine; we render what we have */ }
+  }
+  return out;
+}
+
+class Pane{
+  constructor(host, spec){
+    this.spec = spec; this.d = spec.data; this.frames = this.d.frames;
+    this.nNodes = this.d.n_nodes; this.nRov = this.d.n_rov;
+
+    const el = document.createElement('div'); el.className = 'pane';
+    el.innerHTML = `
+      <div class="tag"><b>${spec.label}</b><span>${spec.sub}</span></div>
+      <div class="verdict ${this.d.meta?.success?'v-ok':'v-bad'}">
+        ${this.d.meta?.success?'MATED':'FAILED'}</div>
+      <div class="hud">
+        <div class="row"><i>cable tension</i><b class="t">—</b></div>
+        <div class="meter"><div class="tm" style="width:0"></div></div>
+        <div class="row" style="margin-top:8px"><i>bend radius</i><b class="b">—</b></div>
+        <div class="meter"><div class="bm" style="width:0"></div></div>
+        <div class="row" style="margin-top:8px"><i>connector gap</i><b class="m">—</b></div>
+      </div>`;
+    host.appendChild(el);
+    this.el = el;
+    this.q = s => el.querySelector(s);
+
+    const w = el.clientWidth || 1, h = el.clientHeight || 1;
+    this.renderer = new THREE.WebGLRenderer({antialias:true, alpha:false});
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.setSize(w, h);
+    el.appendChild(this.renderer.domElement);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x05080f);
+    this.scene.fog = new THREE.FogExp2(0x05080f, 0.022);
+
+    this.camera = new THREE.PerspectiveCamera(50, w/h, 0.1, 400);
+    this.camera.position.set(14, 7, 16);
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.target.set(0, 2.2, 0);
+    this.controls.enableDamping = true;
+
+    this.scene.add(new THREE.HemisphereLight(0x2b4a6b, 0x04070c, 1.1));
+    const key = new THREE.DirectionalLight(0x9fd0ff, 1.0);
+    key.position.set(6, 14, 8); this.scene.add(key);
+
+    this.buildSeabed();
+    this.buildCable();
+    this.buildRovs();
+    this.buildMarks();
+    this.resize();
+  }
+
+  buildSeabed(){
+    const gh = new THREE.GridHelper(60, 60, 0x244463, 0x152a40);
+    gh.position.y = 0.002; this.scene.add(gh);
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(90, 90),
+      new THREE.MeshStandardMaterial({color:0x0a1420, roughness:1,
+        metalness:0}));
+    floor.rotation.x = -Math.PI/2; this.scene.add(floor);
+  }
+
+  buildCable(){
+    // A tube would be prettier but needs a rebuild every frame for 20 nodes;
+    // a thick line plus node spheres reads just as well and stays at 60 fps.
+    const pos = new THREE.BufferAttribute(new Float32Array(this.nNodes*3), 3);
+    const col = new THREE.BufferAttribute(new Float32Array(this.nNodes*3), 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', pos); geo.setAttribute('color', col);
+    this.cableGeo = geo;
+    this.cable = new THREE.Line(geo, new THREE.LineBasicMaterial(
+      {vertexColors:true, linewidth:3}));
+    this.scene.add(this.cable);
+
+    this.nodes = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.11, 10, 8),
+      new THREE.MeshStandardMaterial({color:0x8fb6d8, roughness:.5}),
+      this.nNodes);
+    this.scene.add(this.nodes);
+    this.dummy = new THREE.Object3D();
+  }
+
+  buildRovs(){
+    const COL = [0x4ea8ff, 0x4ea8ff, 0x4ea8ff, 0xffc24d];
+    this.rovs = [];
+    for (let k=0;k<this.nRov;k++){
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(1.15, .55, .85),
+        new THREE.MeshStandardMaterial({color:COL[k], roughness:.35,
+          metalness:.5, emissive:COL[k], emissiveIntensity:.14}));
+      g.add(body);
+      // the manipulator / connector reach, so the tip is visible
+      const arm = new THREE.Mesh(
+        new THREE.CylinderGeometry(.045,.045,.8,8),
+        new THREE.MeshStandardMaterial({color:0xbdd3e6}));
+      arm.position.y = k===3 ? .4 : -.4; g.add(arm);
+      const tip = new THREE.Mesh(
+        new THREE.SphereGeometry(.1,10,8),
+        new THREE.MeshStandardMaterial({color:k===3?0xffc24d:0x6f8ba3,
+          emissive:k===3?0xffc24d:0x000000, emissiveIntensity:.5}));
+      tip.position.y = k===3 ? .8 : -.8; g.add(tip);
+      this.scene.add(g); this.rovs.push(g);
+    }
+  }
+
+  buildMarks(){
+    // working height, so the lift is legible
+    const r = new THREE.Mesh(
+      new THREE.RingGeometry(.28,.36,24),
+      new THREE.MeshBasicMaterial({color:0x2ee6a8, transparent:true,
+        opacity:.5, side:THREE.DoubleSide}));
+    r.rotation.x = -Math.PI/2; r.position.y = LIFT_H; this.scene.add(r);
+    this.heightRing = r;
+  }
+
+  resize(){
+    const w = this.el.clientWidth, h = this.el.clientHeight;
+    if (!w || !h) return;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w/h; this.camera.updateProjectionMatrix();
+  }
+
+  frameAt(t){
+    const dt = this.d.dt || 0.06;
+    const i = Math.min(this.frames.length-1, Math.max(0, Math.round(t/dt)));
+    return this.frames[i];
+  }
+
+  apply(t){
+    const f = this.frameAt(t);
+    if (!f) return f;
+    const p = this.cableGeo.attributes.position.array;
+    const c = this.cableGeo.attributes.color.array;
+    const frac = Math.min(1.5, f.tension / WORKING_TENSION);
+    // colour the whole span by how close it is to the working limit: green
+    // through amber to red. Tension is reported per span, not per node.
+    const col = new THREE.Color().setHSL(
+      (1 - Math.min(1, frac)) * 0.36, 0.85, 0.52 + 0.08*Math.min(1,frac));
+    for (let i=0;i<this.nNodes;i++){
+      p[i*3]   = f.cable[i*3];
+      p[i*3+1] = f.cable[i*3+2];       // sim z is up -> three.js y
+      p[i*3+2] = f.cable[i*3+1];
+      c[i*3] = col.r; c[i*3+1] = col.g; c[i*3+2] = col.b;
+      this.dummy.position.set(p[i*3], p[i*3+1], p[i*3+2]);
+      this.dummy.updateMatrix();
+      this.nodes.setMatrixAt(i, this.dummy.matrix);
+    }
+    this.cableGeo.attributes.position.needsUpdate = true;
+    this.cableGeo.attributes.color.needsUpdate = true;
+    this.nodes.instanceMatrix.needsUpdate = true;
+    this.nodes.material.color = col;
+
+    for (let k=0;k<this.nRov;k++){
+      const g = this.rovs[k];
+      g.position.set(f.rov[k*3], f.rov[k*3+2], f.rov[k*3+1]);
+      g.rotation.y = -f.yaw[k];
+    }
+
+    // HUD
+    const tp = Math.min(100, 100*frac);
+    this.q('.t').textContent = `${Math.round(f.tension)} N · ${Math.round(100*frac)}%`;
+    this.q('.t').style.color = frac>1 ? 'var(--bad)' : frac>.75 ? 'var(--warn)' : 'var(--ok)';
+    this.q('.tm').style.width = tp+'%';
+    this.q('.tm').style.background = frac>1 ? 'var(--bad)' : frac>.75 ? 'var(--warn)' : 'var(--ok)';
+
+    const bm = f.bend / MIN_BEND;
+    this.q('.b').textContent = `${f.bend.toFixed(2)} m · ${bm.toFixed(2)}x limit`;
+    this.q('.b').style.color = bm<1 ? 'var(--bad)' : bm<1.3 ? 'var(--warn)' : 'var(--ok)';
+    this.q('.bm').style.width = Math.min(100, 100/Math.max(bm,.01))+'%';
+    this.q('.bm').style.background = bm<1 ? 'var(--bad)' : bm<1.3 ? 'var(--warn)' : 'var(--ok)';
+
+    this.q('.m').textContent = `${(f.mate*100).toFixed(1)} cm`;
+    this.q('.m').style.color = f.mate<0.08 ? 'var(--ok)' : 'var(--ink)';
+    return f;
+  }
+
+  render(){ this.controls.update(); this.renderer.render(this.scene, this.camera); }
+}
+
+// ---------------------------------------------------------------- bootstrap
+const specs = await load();
+if (!specs.length){
+  document.getElementById('err').style.display = 'grid';
+} else {
+  const host = document.getElementById('stage');
+  const panes = specs.map(s => new Pane(host, s));
+  const dur = Math.max(...panes.map(p => (p.frames.length-1) * (p.d.dt||0.06)));
+
+  let t = 0, playing = true, speed = 1, last = performance.now();
+  const $ = id => document.getElementById(id);
+
+  $('play').onclick = () => { playing = !playing;
+    $('play').textContent = playing ? 'Pause' : 'Play'; };
+  $('scrub').oninput = e => { t = dur * e.target.value/1000; playing = false;
+    $('play').textContent = 'Play'; };
+  $('speed').onchange = e => speed = parseFloat(e.target.value);
+  let camIdx = 0;
+  const CAMS = [[14,7,16],[0,3.2,18],[22,2.5,0],[0,16,0.1]];
+  $('cam').onclick = () => { camIdx = (camIdx+1)%CAMS.length;
+    panes.forEach(p => p.camera.position.set(...CAMS[camIdx])); };
+  addEventListener('resize', () => panes.forEach(p => p.resize()));
+  addEventListener('keydown', e => {
+    if (e.code === 'Space'){ e.preventDefault(); $('play').click(); }
+  });
+
+  function loop(now){
+    const d = Math.min(0.1, (now-last)/1000); last = now;
+    if (playing){ t += d*speed; if (t > dur) t = 0; }
+    let ph = 0;
+    for (const p of panes){ const f = p.apply(t); if (f) ph = f.phase; p.render(); }
+    $('scrub').value = Math.round(1000*t/dur);
+    $('clock').textContent = `${t.toFixed(1)} / ${dur.toFixed(1)} s`;
+    $('phase').textContent = PHASES[ph] || '—';
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
