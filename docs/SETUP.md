@@ -17,6 +17,8 @@ Token Factory, and use of an NVIDIA open-source model.
 ## Install
 
 ```bash
+git clone https://github.com/abyaz16/sea-robots.git
+cd sea-robots
 pip install -r requirements.txt
 ```
 

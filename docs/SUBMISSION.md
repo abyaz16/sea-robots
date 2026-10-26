@@ -1,7 +1,8 @@
-# Project Leviathan — submission
+# Sea Robots (Project Leviathan) — submission
 
 **Track:** Physical AI
 **Hackathon:** Nebius x NVIDIA Global AI Hackathon
+**Repository:** [https://github.com/abyaz16/sea-robots](https://github.com/abyaz16/sea-robots)
 **Licence:** Apache-2.0
 
 ---

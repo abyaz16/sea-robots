@@ -1,8 +1,9 @@
-# Project Leviathan
+# Sea Robots (Project Leviathan)
 
 **Autonomous subsea cable repair, trained and evaluated in simulation.**
 
 Submission to the [Nebius x NVIDIA Global AI Hackathon](https://nebiusglobalaihackathon.devpost.com) — **Physical AI** track.
+GitHub: [https://github.com/abyaz16/sea-robots](https://github.com/abyaz16/sea-robots)
 
 ---
 
@@ -124,6 +125,8 @@ prints the whole model spec.
 ## Quickstart
 
 ```bash
+git clone https://github.com/abyaz16/sea-robots.git
+cd sea-robots
 pip install -r requirements.txt
 python sim/config.py              # print the physical model
 python -m tests.test_stability    # Day-1 checkpoint: 60 s in 6 sea states
